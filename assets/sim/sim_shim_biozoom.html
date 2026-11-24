@@ -1,0 +1,2137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    /* touch-action is set here as well as on the canvas: a pinch that starts on
+       a letterbox bar (body, not canvas) would otherwise be swallowed by the
+       browser as page zoom before the gesture handler ever sees it. */
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #0f0f19;
+      touch-action: none;
+      overscroll-behavior: none;
+    }
+    /* Position and size are written inline by the stabilizer's _fit(). The
+       body background shows through as the letterbox bars. */
+    canvas#_pc_canvas {
+      display: block;
+      position: fixed;
+      top: 0;
+      left: 0;
+      transform-origin: 0 0;
+      touch-action: none;
+    }
+    #_pc_error {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(10,10,20,0.96);
+    color: #f87171;
+    font: 12px/1.7 'JetBrains Mono','Fira Code',monospace;
+    padding: 24px;
+    overflow: auto;
+    z-index: 9999;
+  }
+  #_pc_error h4 {
+    font-size: 13px;
+    font-weight: 600;
+    color: #fca5a5;
+    margin-bottom: 10px;
+  }
+  #_pc_error pre {
+    color: #6b7280;
+    font-size: 11px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin-top: 6px;
+  }
+  #_pc_error ._pc_hint {
+    margin-top: 14px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    background: rgba(251,191,36,0.08);
+    border: 1px solid rgba(251,191,36,0.2);
+    color: #fbbf24;
+    font-size: 11px;
+  }
+    #_pc_rotate {
+      display: none;
+      position: fixed;
+      inset: 0;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      z-index: 9998;
+    }
+    #_pc_rotate ._pc_rotate_card {
+      pointer-events: auto;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      padding: 18px 22px;
+      border-radius: 12px;
+      background: rgba(15, 15, 25, 0.92);
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      color: #cbd5e1;
+      font: 13px/1.5 system-ui, -apple-system, sans-serif;
+      text-align: center;
+      max-width: 78vw;
+    }
+    #_pc_rotate svg { color: #818cf8; animation: _pc_tilt 2.2s ease-in-out infinite; }
+    #_pc_rotate button {
+      background: none;
+      border: 0;
+      color: #64748b;
+      font: 11px system-ui, -apple-system, sans-serif;
+      text-decoration: underline;
+      cursor: pointer;
+      padding: 2px 6px;
+    }
+    @keyframes _pc_tilt {
+      0%, 55%, 100% { transform: rotate(0deg); }
+      75%           { transform: rotate(-90deg); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #_pc_rotate svg { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <div id="_pc_error"></div>
+
+  <script>
+    /* UI Stabilizer geometry — shared with the host via stageMetrics.ts */
+    window.__pcStageProfiles = [{"name":"21:9","w":1464,"h":628},{"name":"16:9","w":1280,"h":720},{"name":"16:10","w":1210,"h":756},{"name":"3:2","w":1176,"h":784},{"name":"4:3","w":1108,"h":831}];
+window.__pcStageConsts = {"dprCap":2,"maxBackingPx":5000000};
+window.__pcPickStageProfile = function pickStageProfile(vw, vh, profiles) {
+  const long = Math.max(vw, vh);
+  const short = Math.min(vw, vh);
+  const ar = short > 0 ? long / short : 16 / 9;
+  const logAr = Math.log(ar);
+  let best = profiles[0];
+  let bestDist = Infinity;
+  for (let i = 0; i < profiles.length; i++) {
+    const p = profiles[i];
+    const dist = Math.abs(logAr - Math.log(p.w / p.h));
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = p;
+    }
+  }
+  return best;
+};
+window.__pcComputeStageMetrics = function computeStageMetrics(vw, vh, dpr, profile, consts) {
+  const dw = profile.w;
+  const dh = profile.h;
+  const scale = Math.min(vw / dw, vh / dh);
+  const cssW = dw * scale;
+  const cssH = dh * scale;
+  const offsetX = Math.round((vw - cssW) / 2);
+  const offsetY = Math.round((vh - cssH) / 2);
+  let dprEff = Math.min(dpr || 1, consts.dprCap);
+  if (dprEff < 1) dprEff = 1;
+  let backingW = Math.max(1, Math.round(cssW * dprEff));
+  let backingH = Math.max(1, Math.round(cssH * dprEff));
+  if (backingW * backingH > consts.maxBackingPx && dprEff > 1) {
+    const shrink = Math.sqrt(consts.maxBackingPx / (backingW * backingH));
+    dprEff = Math.max(1, dprEff * shrink);
+    backingW = Math.max(1, Math.round(cssW * dprEff));
+    backingH = Math.max(1, Math.round(cssH * dprEff));
+  }
+  const viewportArea = vw * vh;
+  return {
+    profileName: profile.name,
+    designW: dw,
+    designH: dh,
+    scale,
+    cssW,
+    cssH,
+    offsetX,
+    offsetY,
+    dprEff,
+    backingW,
+    backingH,
+    sx: backingW / dw,
+    sy: backingH / dh,
+    isPortrait: vh > vw,
+    fillRatio: viewportArea > 0 ? cssW * cssH / viewportArea : 0
+  };
+};
+    
+    window.__PC_NO_ROTATE_HINT = true;
+    window.__PC_NO_VIEW_ZOOM = true;
+    
+  </script>
+
+  
+  <script>
+    /* p5-compat shim */
+    (function buildP5Shim() {
+  'use strict';
+
+  /* Contrast math — single source of truth, shared with contrast.ts so it can
+     be unit-tested outside the browser. Defines _pcLum / _pcRatio / _pcLift. */
+
+// sRGB channel -> linear light, precomputed. Luminance is then three table
+// reads and two multiplies, cheap enough to run per draw call.
+var _PCLIN = (function () {
+  var t = new Float64Array(256);
+  for (var i = 0; i < 256; i++) {
+    var s = i / 255;
+    t[i] = s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  }
+  return t;
+})();
+
+function _pcCh(v) {
+  v = v < 0 ? 0 : v > 255 ? 255 : Math.round(v);
+  return _PCLIN[v];
+}
+
+/** WCAG relative luminance of an [r,g,b] triple. Alpha is ignored by design. */
+function _pcLum(c) {
+  return 0.2126 * _pcCh(c[0]) + 0.7152 * _pcCh(c[1]) + 0.0722 * _pcCh(c[2]);
+}
+
+/** WCAG contrast ratio between two luminances. Range 1..21. */
+function _pcRatioL(a, b) {
+  return a > b ? (a + 0.05) / (b + 0.05) : (b + 0.05) / (a + 0.05);
+}
+
+function _pcRatio(c1, c2) {
+  return _pcRatioL(_pcLum(c1), _pcLum(c2));
+}
+
+/**
+ * Return c, or the minimally adjusted copy of c that reaches 'target' contrast
+ * against 'bg'. Bidirectional: lightens on a dark background, darkens on a
+ * light one, so a sketch calling background(255) is handled correctly too.
+ *
+ * Hue is preserved by scaling all three channels by one factor. Only when that
+ * clips (or when c is too close to black to scale at all) does it fall back to
+ * lerping toward white, which necessarily desaturates.
+ *
+ * The adjustment is MINIMAL, never normalized: a color sitting just under the
+ * threshold moves by about one RGB step and is visually identical. Only
+ * genuinely broken colors move far. That property is what makes this safe to
+ * apply to an entire existing library.
+ */
+function _pcLift(c, bg, target) {
+  var lb = _pcLum(bg);
+  if (_pcRatioL(_pcLum(c), lb) >= target) return c;
+
+  // Move toward whichever extreme can actually deliver more contrast. For a
+  // dark background that is always white, for a light one always black; a
+  // mid-gray background picks the better side instead of oscillating.
+  var up = 1.05 / (lb + 0.05) >= (lb + 0.05) / 0.05;
+  var a = c[3];
+  var path;
+
+  if (up) {
+    var mx = Math.max(c[0], c[1], c[2]);
+    if (mx >= 8) {
+      // First half of t scales (hue-preserving); second half lerps the
+      // remainder to white for colors that clip before reaching target.
+      var kMax = 255 / mx;
+      path = function (t) {
+        if (t <= 0.5) {
+          var k = 1 + (kMax - 1) * (t / 0.5);
+          return [c[0] * k, c[1] * k, c[2] * k, a];
+        }
+        var s = (t - 0.5) / 0.5;
+        var b0 = c[0] * kMax, b1 = c[1] * kMax, b2 = c[2] * kMax;
+        return [b0 + (255 - b0) * s, b1 + (255 - b1) * s, b2 + (255 - b2) * s, a];
+      };
+    } else {
+      // Near-black: scaling a zero channel is a no-op, so lerp directly.
+      path = function (t) {
+        return [c[0] + (255 - c[0]) * t, c[1] + (255 - c[1]) * t, c[2] + (255 - c[2]) * t, a];
+      };
+    }
+  } else {
+    path = function (t) {
+      return [c[0] * (1 - t), c[1] * (1 - t), c[2] * (1 - t), a];
+    };
+  }
+
+  // Luminance is monotonic along either path, so bisection converges.
+  var lo = 0, hi = 1;
+  for (var i = 0; i < 24; i++) {
+    var mid = (lo + hi) / 2;
+    if (_pcRatioL(_pcLum(path(mid)), lb) >= target) hi = mid;
+    else lo = mid;
+  }
+  var out = path(hi);
+  return [Math.round(out[0]), Math.round(out[1]), Math.round(out[2]), a];
+}
+
+
+  let _canvas, _ctx, _w, _h;
+  // UI Stabilizer: _dw/_dh are the logical design space the sketch draws in;
+  // _sx/_sy map design px onto the canvas backing store. See stageMetrics.ts.
+  let _dw = 1280, _dh = 720, _sx = 1, _sy = 1;
+  let _profile = null, _frozen = false, _fitPending = 0, _dprCapOverride = 0, _lastFit = null;
+  let _matchBarsPending = true;
+  let _frameCount = 0, _targetFPS = 60;
+  let _fill = [255,255,255,255], _stroke = [0,0,0,255], _strokeW = 1;
+  let _doFill = true, _doStroke = true;
+  let _textSz = 12, _textFnt = 'monospace';
+  let _textAlignH = 'left', _textAlignV = 'alphabetic';
+  let _looping = true, _rafId = null, _lastFrameTime = 0;
+  let _rectMode = 'CORNER', _ellipseMode = 'CENTER';
+  let _mouseX = 0, _mouseY = 0, _pmouseX = 0, _pmouseY = 0;
+  let _mouseIsPressed = false, _key = '', _keyCode = 0;
+  let _touches = [];
+  let _inShape = false, _shapeFirst = true;
+  let _colorMode = 'RGB', _cMax = [255,255,255,255];
+  // Style stack for push()/pop(). The ctx save stack alone is not enough: every
+  // primitive re-derives fillStyle/strokeStyle from these JS vars via
+  // _applyStyles, so a bare ctx.restore() is immediately overwritten.
+  var _styleStack = [], _saveDepth = 0;
+  // View transform (pinch/wheel zoom). Layered ON TOP of the stabilizer's base
+  // transform, so the sketch is unaware of it and keeps drawing in design space.
+  // Pan is held in design px so it survives a refit at a new display size.
+  let _vz = 1, _vx = 0, _vy = 0;
+  const _VZ_MIN = 1, _VZ_MAX = 6;
+
+  // ── UI Stabilizer ──────────────────────────────────────────────────────────
+  // The sketch is told it lives in a fixed design space (_dw x _dh) chosen to
+  // match the display's aspect ratio. The canvas element is then scaled and
+  // centred to fit the real viewport, and the 2D context carries a base
+  // transform mapping design px -> backing px. Sketches need no changes.
+
+  function _measure() {
+    var de = document.documentElement;
+    return {
+      vw: de.clientWidth  || window.innerWidth  || 0,
+      vh: de.clientHeight || window.innerHeight || 0
+    };
+  }
+
+  // Pick the design profile. Re-picks freely until the space is first consumed
+  // (i.e. until createCanvas), then freezes for the session so that width and
+  // height never change under a sketch that cached them in setup().
+  function _ensureProfile() {
+    if (_frozen && _profile) return;
+    var ps = window.__pcStageProfiles || [];
+    if (!ps.length) return;
+    var m = _measure();
+    if (m.vw > 0 && m.vh > 0) {
+      _profile = window.__pcPickStageProfile(m.vw, m.vh, ps);
+    } else if (!_profile) {
+      // A sandboxed iframe can measure 0 during early layout. Use a provisional
+      // profile WITHOUT freezing; the ResizeObserver delivers a real one shortly.
+      for (var i = 0; i < ps.length; i++) if (ps[i].name === '16:9') _profile = ps[i];
+      if (!_profile) _profile = ps[0];
+    }
+    if (_profile) { _dw = _profile.w; _dh = _profile.h; }
+  }
+
+  // Base transform: design px -> backing px, with NO view zoom. Used by anything
+  // that must cover the whole canvas or stay screen-anchored regardless of zoom
+  // (background clears, the crash overlay).
+  function _baseTransform() { if (_ctx) _ctx.setTransform(_sx, 0, 0, _sy, 0, 0); }
+
+  // What the sketch draws under: base composed with the view transform.
+  // backing = _s * (design * _vz + _v)
+  function _resetTransform() {
+    if (_ctx) _ctx.setTransform(_sx * _vz, 0, 0, _sy * _vz, _sx * _vx, _sy * _vy);
+  }
+
+  function _fit() {
+    if (!_canvas || !_ctx) return;
+    _ensureProfile();
+
+    var m0 = _measure();
+    var vw = m0.vw || _dw, vh = m0.vh || _dh;
+
+    var consts = window.__pcStageConsts || { dprCap: 2, maxBackingPx: 5000000 };
+    if (_dprCapOverride > 0) consts = { dprCap: _dprCapOverride, maxBackingPx: consts.maxBackingPx };
+
+    // Fit the ACTUAL logical size, which may differ from the profile if the
+    // sketch called createCanvas with explicit dimensions.
+    var m = window.__pcComputeStageMetrics(
+      vw, vh, window.devicePixelRatio || 1,
+      { name: _profile ? _profile.name : 'custom', w: _w || _dw, h: _h || _dh },
+      consts
+    );
+
+    _canvas.style.width  = m.cssW + 'px';
+    _canvas.style.height = m.cssH + 'px';
+    _canvas.style.left   = m.offsetX + 'px';
+    _canvas.style.top    = m.offsetY + 'px';
+
+    // Reassigning width/height clears the whole 2D context state. Styles are
+    // re-applied per primitive by _applyStyles, so only the transform needs
+    // restoring — which _resetTransform does below.
+    if (_canvas.width !== m.backingW || _canvas.height !== m.backingH) {
+      _canvas.width  = m.backingW;
+      _canvas.height = m.backingH;
+    }
+
+    _sx = m.sx; _sy = m.sy;
+    // Reassigning _canvas.width above discards the entire Canvas2D save stack,
+    // so the depth counter must be zeroed with it or the two desync.
+    _saveDepth = 0; _styleStack.length = 0;
+    _resetTransform();
+    _lastFit = m;
+    _matchBarsPending = true;
+    _updateRotateHint(m);
+
+    try {
+      window.parent.postMessage({
+        type: 'SIMULATION_FIT',
+        profile: m.profileName,
+        designW: m.designW, designH: m.designH,
+        scale: m.scale, dprEff: m.dprEff,
+        contentX: m.offsetX, contentY: m.offsetY,
+        contentW: m.cssW, contentH: m.cssH,
+        isPortrait: m.isPortrait, fillRatio: m.fillRatio
+      }, '*');
+    } catch (e) {}
+
+    if (typeof window.__pcOnFit === 'function') {
+      try { window.__pcOnFit(m); } catch (e) {}
+    }
+  }
+
+  var _hintEl = null, _hintDismissed = false;
+  function _updateRotateHint(m) {
+    if (window.__PC_NO_ROTATE_HINT || _hintDismissed) return;
+    var show = m.isPortrait && m.fillRatio < 0.55;
+    if (!show) { if (_hintEl) _hintEl.style.display = 'none'; return; }
+    if (!_hintEl) {
+      _hintEl = document.createElement('div');
+      _hintEl.id = '_pc_rotate';
+      _hintEl.innerHTML =
+        '<div class="_pc_rotate_card">' +
+        '<svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
+        '<rect x="4" y="2" width="16" height="20" rx="2"/><path d="M9 22h6"/></svg>' +
+        '<div>Rotate your device for a bigger view</div>' +
+        '<button type="button" id="_pc_rotate_x">Dismiss</button>' +
+        '</div>';
+      document.body.appendChild(_hintEl);
+      var btn = document.getElementById('_pc_rotate_x');
+      if (btn) btn.addEventListener('click', function() {
+        _hintDismissed = true;
+        if (_hintEl) _hintEl.style.display = 'none';
+      });
+    }
+    _hintEl.style.display = 'flex';
+  }
+
+  // rAF-coalesced so dragging a window resizes the backing store at most once
+  // per frame, and so a resize can never land inside a synchronous draw().
+  function _scheduleFit() {
+    if (_fitPending) return;
+    _fitPending = requestAnimationFrame(function() { _fitPending = 0; _fit(); });
+  }
+
+  // Map viewport coordinates into UNZOOMED design space. Derives the scale from
+  // the live bounding rect rather than a stored value, so it stays correct under
+  // any fit strategy and at any devicePixelRatio.
+  function _toRawDesign(clientX, clientY) {
+    var r = _canvas
+      ? _canvas.getBoundingClientRect()
+      : { left: 0, top: 0, width: _w || _dw, height: _h || _dh };
+    return {
+      x: (clientX - r.left) * ((_w || _dw) / Math.max(1, r.width)),
+      y: (clientY - r.top)  * ((_h || _dh) / Math.max(1, r.height))
+    };
+  }
+
+  // Map viewport coordinates into the design space the SKETCH sees, i.e. with
+  // the view transform undone. Everything that hit-tests — mouseX/mouseY, every
+  // sketch's own picking, BioZoom's rel() — goes through here, which is what
+  // keeps dragging accurate while zoomed and panned.
+  function _toDesign(clientX, clientY) {
+    var p = _toRawDesign(clientX, clientY);
+    return { x: (p.x - _vx) / _vz, y: (p.y - _vy) / _vz };
+  }
+
+  // ── View zoom ──────────────────────────────────────────────────────────────
+  var _viewPending = 0;
+
+  function _postView() {
+    _viewPending = 0;
+    try {
+      window.parent.postMessage(
+        { type: 'SIMULATION_VIEW', zoom: _vz, panX: _vx, panY: _vy }, '*'
+      );
+    } catch (e) {}
+  }
+
+  function _setView(z, px, py) {
+    var dw = _w || _dw, dh = _h || _dh;
+    z = Math.min(_VZ_MAX, Math.max(_VZ_MIN, z));
+    // At 1x there is nowhere to pan; snap back so a pinch-out always lands on a
+    // clean, centred view rather than a near-1x offset one.
+    if (z === _VZ_MIN) { px = 0; py = 0; }
+    else {
+      // Keep the scaled content covering the viewport — no dragging it off-screen.
+      px = Math.min(0, Math.max(dw * (1 - z), px));
+      py = Math.min(0, Math.max(dh * (1 - z), py));
+    }
+    if (z === _vz && px === _vx && py === _vy) return;
+    _vz = z; _vx = px; _vy = py;
+
+    // A noLoop() sketch never repaints on its own, so zoom would appear frozen.
+    if (!_looping && typeof window.draw === 'function') {
+      _resetTransform();
+      try { window.draw(); } catch (e) { _handleDrawError(e); return; }
+    }
+    if (!_viewPending) _viewPending = requestAnimationFrame(_postView);
+  }
+
+  // Zoom about an anchor point so whatever sits under the fingers/cursor stays
+  // put: the anchor's raw design coord is held fixed across the scale change.
+  function _zoomAt(clientX, clientY, factor) {
+    var raw = _toRawDesign(clientX, clientY);
+    var d = { x: (raw.x - _vx) / _vz, y: (raw.y - _vy) / _vz };
+    var z = Math.min(_VZ_MAX, Math.max(_VZ_MIN, _vz * factor));
+    _setView(z, raw.x - d.x * z, raw.y - d.y * z);
+  }
+
+  function _resetView() { _setView(1, 0, 0); }
+
+  // ── Canvas ─────────────────────────────────────────────────────────────────
+  function _createCanvas(w, h) {
+    if (!_canvas) {
+      _canvas = document.getElementById('_pc_canvas');
+      if (!_canvas) {
+        _canvas = document.createElement('canvas');
+        _canvas.id = '_pc_canvas';
+        document.body.appendChild(_canvas);
+      }
+    }
+    // An explicit size becomes the design space and is honoured as-is; the
+    // fitter then scales it to the viewport. Otherwise the sketch gets the
+    // profile size, which is what windowWidth/windowHeight already report.
+    _ensureProfile();
+    _frozen = true;                     // the coordinate space is now committed
+    _w = _dw = (w && w > 0) ? w : _dw;
+    _h = _dh = (h && h > 0) ? h : _dh;
+    _ctx = _canvas.getContext('2d');
+    _fit();
+    if (!_canvas.__pcObserved) {
+      _canvas.__pcObserved = true;
+      if (window.ResizeObserver) new ResizeObserver(_scheduleFit).observe(document.documentElement);
+    }
+    return _canvas;
+  }
+
+  // ── Color ──────────────────────────────────────────────────────────────────
+  function _hsbToRgb(h, s, v) {
+    var i = Math.floor(h * 6), f = h * 6 - i;
+    var p = v * (1 - s), q = v * (1 - f * s), u = v * (1 - (1 - f) * s), r, g, b;
+    switch (i % 6) {
+      case 0: r = v; g = u; b = p; break;
+      case 1: r = q; g = v; b = p; break;
+      case 2: r = p; g = v; b = u; break;
+      case 3: r = p; g = q; b = v; break;
+      case 4: r = u; g = p; b = v; break;
+      default: r = v; g = p; b = q;
+    }
+    return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+  }
+
+  function _hslToRgb(h, s, l) {
+    if (s === 0) { var y = Math.round(l * 255); return [y, y, y]; }
+    var q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+    function hk(t) {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1 / 6) return p + (q - p) * 6 * t;
+      if (t < 1 / 2) return q;
+      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+      return p;
+    }
+    return [Math.round(hk(h + 1/3) * 255), Math.round(hk(h) * 255), Math.round(hk(h - 1/3) * 255)];
+  }
+
+  // HSB/HSL are converted to RGBA255 on the way IN, so _fill/_stroke are always
+  // RGB internally. That is required, not stylistic: Sim.trajectory, Sim.particle
+  // and Sim.populationPlot all do red(color(c))/green(...)/blue(...) arithmetic
+  // and would break if the stored form were mode-scaled. Divergence from p5:
+  // red()/green()/blue() therefore return true RGB channels even in HSB mode.
+  function _fromMode(v1, v2, v3, v4) {
+    if (v2 === undefined) {
+      var y = Math.round(255 * (v1 / _cMax[2]));
+      return [y, y, y, 255];
+    }
+    var h = (((v1 / _cMax[0]) % 1) + 1) % 1;
+    var s = Math.min(1, Math.max(0, v2 / _cMax[1]));
+    var t = Math.min(1, Math.max(0, v3 / _cMax[2]));
+    var al = v4 === undefined ? 255 : Math.round(255 * (v4 / _cMax[3]));
+    var rgb = _colorMode === 'HSL' ? _hslToRgb(h, s, t) : _hsbToRgb(h, s, t);
+    return [rgb[0], rgb[1], rgb[2], al];
+  }
+
+  function _parseColor(r, g, b, a) {
+    if (Array.isArray(r)) return r;
+    if (typeof r === 'string') return r; // pass-through for CSS strings
+    if (_colorMode !== 'RGB') return _fromMode(r, g, b, a);
+    if (g === undefined) return [r, r, r, 255];
+    if (b === undefined) return [r, r, r, g];
+    return [r, g, b, a === undefined ? 255 : a];
+  }
+
+  function _css(c) {
+    if (typeof c === 'string') return c;
+    return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + (c[3] / 255).toFixed(3) + ')';
+  }
+
+  // ── Contrast floor ─────────────────────────────────────────────────────────
+  // Generated sketches routinely emit dark ink on the dark canvas. _ink() is the
+  // repair path for STROKES and TEXT only; area fills and background() go
+  // through plain _css so authored artwork (medium shading, panels) is never
+  // touched. See contrast.ts for the math.
+  var _T_STROKE = 3.0, _T_TEXT = 4.5;
+  var _bg = [15, 15, 25, 255];
+  var _inkBg = null;   // local reference background (text drawn on a shape)
+  var _bgKey = 0;      // bumped whenever the reference background changes
+  var _floorOn = !window.__PC_NO_CONTRAST_FLOOR;
+  var _probe = null, _strCache = {}, _strCacheN = 0, _memo = {};
+
+  function _parseNormalized(o) {
+    if (o.charAt(0) === '#') {
+      return [parseInt(o.substr(1,2),16), parseInt(o.substr(3,2),16), parseInt(o.substr(5,2),16), 255];
+    }
+    // Backslashes are doubled because this source lives inside a template
+    // literal — a single \( would be eaten and emit a capture group instead of
+    // a literal paren, silently turning every rgba() readback into NaN.
+    var m = o.match(/rgba?\(([^)]+)\)/);
+    if (!m) return null;
+    var p = m[1].split(',');
+    return [parseInt(p[0],10), parseInt(p[1],10), parseInt(p[2],10),
+            p.length > 3 ? Math.round(parseFloat(p[3]) * 255) : 255];
+  }
+
+  // Resolve any CSS color string through the canvas itself, which handles named
+  // colors and every CSS syntax for free. The sentinel is load-bearing: an
+  // invalid fillStyle assignment leaves the previous value, so the readback is
+  // the only way to detect a garbage string.
+  function _strToRgba(s) {
+    if (Object.prototype.hasOwnProperty.call(_strCache, s)) return _strCache[s];
+    if (!_probe) {
+      try { _probe = document.createElement('canvas').getContext('2d'); } catch (e) { _probe = null; }
+    }
+    var v = null;
+    if (_probe) {
+      _probe.fillStyle = '#010203';
+      _probe.fillStyle = s;
+      var out = _probe.fillStyle;
+      if (!(out === '#010203' && s !== '#010203')) v = _parseNormalized(out);
+    }
+    if (_strCacheN < 512) { _strCache[s] = v; _strCacheN++; }
+    return v;
+  }
+
+  function _toRgba(c) { return typeof c === 'string' ? _strToRgba(c) : c; }
+
+  function _inkCompute(c, target) {
+    var arr = _toRgba(c);
+    if (!arr) return _css(c);                       // unparseable — leave alone
+    var lifted = _pcLift(arr, _inkBg || _bg, target);
+    if (lifted === arr) return _css(c);             // already legible
+    var a = lifted[3] === undefined ? 255 : lifted[3];
+    return 'rgba(' + lifted[0] + ',' + lifted[1] + ',' + lifted[2] + ',' + (a / 255).toFixed(3) + ')';
+  }
+
+  // _parseColor returns a FRESH array per fill()/stroke() call and the shim
+  // never mutates a color array in place, so identity is an exact cache key —
+  // 500 line() calls in one frame compute the floor once. Do not make fill()
+  // mutate without revisiting this.
+  function _ink(c, target) {
+    if (!_floorOn) return _css(c);
+    var m = _memo[target];
+    if (m && m.i === c && m.k === _bgKey) return m.o;
+    var o = _inkCompute(c, target);
+    _memo[target] = { i: c, k: _bgKey, o: o };
+    return o;
+  }
+
+  function _applyStyles() {
+    _ctx.fillStyle   = _doFill   ? _css(_fill)            : 'rgba(0,0,0,0)';
+    // The transparent sentinel must never reach _ink — lifting it would make
+    // noStroke() stop working.
+    _ctx.strokeStyle = _doStroke ? _ink(_stroke, _T_STROKE) : 'rgba(0,0,0,0)';
+    _ctx.lineWidth   = _strokeW;
+  }
+
+  function _snapStyle() {
+    return { fill: _fill, stroke: _stroke, strokeW: _strokeW,
+             doFill: _doFill, doStroke: _doStroke,
+             textSz: _textSz, textFnt: _textFnt,
+             textAlignH: _textAlignH, textAlignV: _textAlignV,
+             rectMode: _rectMode, ellipseMode: _ellipseMode,
+             colorMode: _colorMode, cMax: _cMax, inkBg: _inkBg };
+  }
+
+  function _restoreStyle(s) {
+    _fill = s.fill; _stroke = s.stroke; _strokeW = s.strokeW;
+    _doFill = s.doFill; _doStroke = s.doStroke;
+    _textSz = s.textSz; _textFnt = s.textFnt;
+    _textAlignH = s.textAlignH; _textAlignV = s.textAlignV;
+    _rectMode = s.rectMode; _ellipseMode = s.ellipseMode;
+    _colorMode = s.colorMode; _cMax = s.cMax;
+    if (_inkBg !== s.inkBg) { _inkBg = s.inkBg; _bgKey++; }
+  }
+
+  // Unwind anything the previous frame left unbalanced. Resets the STACK, not
+  // the style VALUES — p5 preserves style across frames, and sketches that set
+  // textFont/rectMode in setup() rely on that.
+  function _frameReset() {
+    while (_saveDepth > 0) { _ctx.restore(); _saveDepth--; }
+    _styleStack.length = 0;
+    _resetTransform();
+  }
+
+  // ── rAF loop ───────────────────────────────────────────────────────────────
+  function _tick(ts) {
+    if (!_looping) return;
+    if (ts - _lastFrameTime >= 1000 / _targetFPS) {
+      _lastFrameTime = ts;
+      _frameCount++;
+      _pmouseX = _mouseX; _pmouseY = _mouseY;
+      if (typeof window.draw === 'function') {
+        _frameReset();
+        try { window.draw(); }
+        catch (e) { _handleDrawError(e); return; }
+      }
+    }
+    _rafId = requestAnimationFrame(_tick);
+  }
+
+  function _handleDrawError(e) {
+    _looping = false;
+    window.parent.postMessage({ type: 'SIMULATION_ERROR', error: e.message, stage: 'draw' }, '*');
+    if (!_ctx) return;
+    _ctx.save();
+    // Base transform so the crash text stays full-screen and legible even if the
+    // teacher was zoomed in when the sketch threw.
+    _baseTransform();
+    _ctx.fillStyle = 'rgba(0,0,0,0.88)';
+    _ctx.fillRect(0, 0, _w, _h);
+    _ctx.fillStyle = '#f87171';
+    _ctx.font = '12px monospace';
+    _ctx.fillText('Draw error: ' + e.message, 14, 32);
+    _ctx.fillStyle = '#6b7280';
+    _ctx.font = '11px monospace';
+    (e.stack || '').split('\n').slice(0,8).forEach(function(l, i) {
+      _ctx.fillText(l, 14, 54 + i * 16);
+    });
+    _ctx.restore();
+  }
+
+  // ── Globals ────────────────────────────────────────────────────────────────
+  const G = window;
+
+  // Constants
+  G.PI = Math.PI; G.TWO_PI = Math.PI*2; G.TAU = Math.PI*2;
+  G.HALF_PI = Math.PI/2; G.QUARTER_PI = Math.PI/4;
+  G.CORNER = 'CORNER'; G.CENTER = 'CENTER'; G.CORNERS = 'CORNERS'; G.RADIUS = 'RADIUS';
+  G.OPEN = 'OPEN'; G.CLOSE = 'CLOSE';
+  G.LEFT = 'left'; G.RIGHT = 'right'; G.TOP = 'top'; G.BOTTOM = 'bottom'; G.BASELINE = 'alphabetic';
+  G.RGB = 'RGB'; G.HSB = 'HSB';
+  G.ENTER = 13; G.BACKSPACE = 8; G.DELETE = 46; G.ESCAPE = 27;
+  G.UP_ARROW = 38; G.DOWN_ARROW = 40; G.LEFT_ARROW = 37; G.RIGHT_ARROW = 39;
+  G.SHIFT = 16; G.CONTROL = 17; G.ALT = 18;
+
+  // Canvas lifecycle
+  G.createCanvas = function(w, h) { return _createCanvas(w, h); };
+  G.resizeCanvas = function(w, h) {
+    if (!_canvas) return;
+    _w = _dw = w; _h = _dh = h;
+    _fit();
+  };
+  // Caps the device pixel ratio the fitter is allowed to use. Kept because some
+  // sketches call it; it now feeds the one fitter instead of a parallel path.
+  G.pixelDensity = function(d) {
+    if (d !== undefined) { _dprCapOverride = d; _fit(); }
+    return _lastFit ? _lastFit.dprEff : 1;
+  };
+
+  // Dynamic size accessors
+  Object.defineProperty(G, 'width',  { get: function() { return _w || _dw; }, configurable: true });
+  Object.defineProperty(G, 'height', { get: function() { return _h || _dh; }, configurable: true });
+  Object.defineProperty(G, 'frameCount', { get: function() { return _frameCount; }, configurable: true });
+  // The design space, not the physical viewport. Getters rather than plain
+  // values so a provisional profile can be corrected before createCanvas runs;
+  // after that the profile is frozen and these never change again.
+  _ensureProfile();
+  Object.defineProperty(G, 'windowWidth',  { get: function() { return _dw; }, configurable: true });
+  Object.defineProperty(G, 'windowHeight', { get: function() { return _dh; }, configurable: true });
+
+  // Color API
+  // Real colorMode. Previously a no-op while G.HSB existed as a constant, so
+  // colorMode(HSB); fill(200,80,90) silently rendered near-black — the exact
+  // failure class this change exists to remove.
+  G.colorMode = function(mode, m1, m2, m3, mA) {
+    _colorMode = (mode === 'HSB' || mode === 'HSL') ? mode : 'RGB';
+    var isRGB = _colorMode === 'RGB';
+    if (m1 === undefined)      _cMax = isRGB ? [255,255,255,255] : [360,100,100,1];
+    else if (m2 === undefined) _cMax = [m1, m1, m1, isRGB ? m1 : 1];
+    else                       _cMax = [m1, m2, m3, mA === undefined ? (isRGB ? 255 : 1) : mA];
+  };
+  G.color = function(r, g, b, a) { return _parseColor(r, g, b, a); };
+  G.red   = function(c) { return Array.isArray(c) ? c[0] : 0; };
+  G.green = function(c) { return Array.isArray(c) ? c[1] : 0; };
+  G.blue  = function(c) { return Array.isArray(c) ? c[2] : 0; };
+  G.alpha = function(c) { return Array.isArray(c) ? c[3] : 255; };
+  G.lerpColor = function(c1, c2, t) {
+    if (!Array.isArray(c1) || !Array.isArray(c2)) return c1;
+    return c1.map(function(v, i) { return Math.round(v + (c2[i] - v) * t); });
+  };
+
+  // Draw state
+  G.background = function(r, g, b, a) {
+    // Base transform, not the view one: the clear must cover the whole canvas at
+    // any zoom/pan, otherwise panning smears stale pixels around the edges.
+    _ctx.save(); _baseTransform();
+    var bgc = _parseColor(r, g, b, a);
+    // Record the reference the contrast floor measures against. Deliberately
+    // plain _css, never _ink — lifting the background would drift it frame over
+    // frame and destroy the very reference we are measuring.
+    var bgArr = _toRgba(bgc);
+    // Alpha is ignored on purpose: background(15,15,25,25) is the standard
+    // motion-trail idiom and the canvas still tends toward the opaque colour.
+    if (bgArr) { _bg = [bgArr[0], bgArr[1], bgArr[2], 255]; _bgKey++; }
+    _ctx.fillStyle = _css(bgc);
+    _ctx.fillRect(0, 0, _w, _h);
+    _ctx.restore();
+    if (_matchBarsPending) { _matchBarsPending = false; _matchLetterbox(); }
+  };
+
+  // Sample what the sketch actually painted and tint the letterbox bars to
+  // match, so a sketch with a non-default palette does not sit in a frame of
+  // the wrong colour. One 1x1 read per fit; skipped if the canvas is tainted.
+  function _matchLetterbox() {
+    try {
+      var d = _ctx.getImageData(1, 1, 1, 1).data;
+      if (d[3] > 250) {
+        document.body.style.background = 'rgb(' + d[0] + ',' + d[1] + ',' + d[2] + ')';
+      }
+    } catch (e) { /* cross-origin image tainted the canvas — leave the default */ }
+  }
+  G.fill       = function(r, g, b, a) { _fill = _parseColor(r, g, b, a); _doFill = true; };
+  G.noFill     = function() { _doFill = false; };
+  G.stroke     = function(r, g, b, a) { _stroke = _parseColor(r, g, b, a); _doStroke = true; };
+  G.noStroke   = function() { _doStroke = false; };
+  G.strokeWeight = function(w) { _strokeW = w; };
+  // Defined here rather than in p5ShimExtension because that file has no
+  // closure access to _ctx. Sim.unitCircle already calls this, and SIM_API_DOCS
+  // advertises the showProjections option that reaches it — so until now that
+  // option was a guaranteed ReferenceError.
+  G.setLineDash = function(a) { if (_ctx) _ctx.setLineDash(a || []); };
+  G.noLineDash  = function() { if (_ctx) _ctx.setLineDash([]); };
+  G.rectMode   = function(m) { _rectMode = m; };
+  G.ellipseMode = function(m) { _ellipseMode = m; };
+
+  // Shapes
+  G.rect = function(x, y, w, h, r1, r2, r3, r4) {
+    _applyStyles();
+    if (_rectMode === 'CENTER') { x -= w/2; y -= h/2; }
+    _ctx.beginPath();
+    const r = r1 || 0;
+    if (r && _ctx.roundRect) {
+      _ctx.roundRect(x, y, w, h, [r1||0, r2||r1||0, r3||r1||0, r4||r1||0]);
+    } else {
+      _ctx.rect(x, y, w, h);
+    }
+    if (_doFill) _ctx.fill();
+    if (_doStroke) _ctx.stroke();
+  };
+  G.ellipse = function(x, y, w, h) {
+    _applyStyles();
+    h = (h !== undefined) ? h : w;
+    let rx = w/2, ry = h/2, cx = x, cy = y;
+    if (_ellipseMode === 'CORNER')   { cx = x+rx; cy = y+ry; }
+    if (_ellipseMode === 'RADIUS')   { rx = w; ry = h; }
+    if (_ellipseMode === 'CORNERS')  { cx = (x+w)/2; cy = (y+h)/2; rx = Math.abs(w-x)/2; ry = Math.abs(h-y)/2; }
+    _ctx.beginPath();
+    _ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, 0, Math.PI*2);
+    if (_doFill) _ctx.fill();
+    if (_doStroke) _ctx.stroke();
+  };
+  G.circle    = function(x, y, d) { G.ellipse(x, y, d, d); };
+  G.line      = function(x1, y1, x2, y2) {
+    _applyStyles();
+    _ctx.beginPath(); _ctx.moveTo(x1, y1); _ctx.lineTo(x2, y2); _ctx.stroke();
+  };
+  G.point     = function(x, y) {
+    _applyStyles();
+    _ctx.beginPath();
+    _ctx.arc(x, y, Math.max(_strokeW/2, 1), 0, Math.PI*2);
+    // A point is a mark, not an area fill — floor it like a stroke.
+    _ctx.fillStyle = _ink(_doStroke ? _stroke : _fill, _T_STROKE);
+    _ctx.fill();
+  };
+  G.triangle  = function(x1,y1,x2,y2,x3,y3) {
+    _applyStyles();
+    _ctx.beginPath();
+    _ctx.moveTo(x1,y1); _ctx.lineTo(x2,y2); _ctx.lineTo(x3,y3);
+    _ctx.closePath();
+    if (_doFill) _ctx.fill(); if (_doStroke) _ctx.stroke();
+  };
+  G.quad      = function(x1,y1,x2,y2,x3,y3,x4,y4) {
+    _applyStyles();
+    _ctx.beginPath();
+    _ctx.moveTo(x1,y1); _ctx.lineTo(x2,y2); _ctx.lineTo(x3,y3); _ctx.lineTo(x4,y4);
+    _ctx.closePath();
+    if (_doFill) _ctx.fill(); if (_doStroke) _ctx.stroke();
+  };
+  G.arc       = function(x,y,w,h,start,stop,mode) {
+    _applyStyles();
+    _ctx.beginPath();
+    _ctx.ellipse(x, y, w/2, h/2, 0, start, stop);
+    if (mode === 'CLOSE' || mode === G.CLOSE) _ctx.closePath();
+    if (_doFill) _ctx.fill(); if (_doStroke) _ctx.stroke();
+  };
+
+  // Path (beginShape / vertex / endShape)
+  G.beginShape  = function() { _ctx.beginPath(); _inShape = true; _shapeFirst = true; };
+  G.vertex      = function(x, y) {
+    if (_shapeFirst) { _ctx.moveTo(x, y); _shapeFirst = false; }
+    else { _ctx.lineTo(x, y); }
+  };
+  G.curveVertex = G.vertex; // simplified
+  G.endShape    = function(mode) {
+    if (mode === 'CLOSE' || mode === G.CLOSE) _ctx.closePath();
+    _applyStyles();
+    if (_doFill) _ctx.fill(); if (_doStroke) _ctx.stroke();
+    _inShape = false;
+  };
+
+  // Text
+  G.textSize  = function(s) { _textSz = s; };
+  G.textFont  = function(f) { _textFnt = f; };
+  G.textAlign = function(h, v) { _textAlignH = h; if (v) _textAlignV = v; };
+  G.text = function(str, x, y, maxW) {
+    _ctx.font         = _textSz + 'px ' + _textFnt;
+    _ctx.textAlign    = _textAlignH === 'CENTER' ? 'center' : _textAlignH;
+    _ctx.textBaseline = _textAlignV === 'CENTER' ? 'middle' : (_textAlignV || 'alphabetic');
+    const s = String(str);
+    // text() bypasses _applyStyles, so the floor has to be applied here too —
+    // and at the stricter body-text threshold.
+    if (_doFill)   { _ctx.fillStyle = _ink(_fill, _T_TEXT); _ctx.fillText(s, x, y, maxW); }
+    // Skip strokeText — canvas stroke on text makes it look bold / unreadable
+    // at small sizes.  If a sketch truly needs outlined text it can use
+    // _ctx directly.  This matches how most p5 sketches actually look.
+  };
+  G.textWidth = function(str) {
+    _ctx.font = _textSz + 'px ' + _textFnt;
+    return _ctx.measureText(String(str)).width;
+  };
+
+  // Transforms
+  // push/pop must save the JS style vars, not just the ctx. Saving only the ctx
+  // was a no-op for colour, because _applyStyles rewrites fillStyle/strokeStyle
+  // from _fill/_stroke before every primitive — which is why 21 of 25 Sim.*
+  // helpers leaked their colour (and their noStroke()) into the calling sketch
+  // despite documenting themselves as stateless.
+  G.push = function() {
+    _styleStack.push(_snapStyle());
+    if (_ctx) { _ctx.save(); _saveDepth++; }
+  };
+  // Over-popping must stay a silent no-op. Generated code does it, and today an
+  // extra ctx.restore() on an empty stack is harmless per spec — throwing here
+  // would turn a tolerated bug into a crash overlay on existing saved sims.
+  G.pop = function() {
+    if (!_styleStack.length) return;
+    if (_saveDepth > 0) { _ctx.restore(); _saveDepth--; }
+    _restoreStyle(_styleStack.pop());
+  };
+  G.translate  = function(x, y) { _ctx.translate(x, y); };
+  G.rotate     = function(a) { _ctx.rotate(a); };
+  G.scale      = function(x, y) { _ctx.scale(x, y === undefined ? x : y); };
+  G.resetMatrix = function() { _resetTransform(); };
+  G.applyMatrix = function(a,b,c,d,e,f) { _ctx.transform(a,b,c,d,e,f); };
+
+  // Math
+  G.abs=Math.abs; G.ceil=Math.ceil; G.floor=Math.floor; G.round=Math.round;
+  G.sqrt=Math.sqrt; G.pow=Math.pow; G.log=Math.log; G.exp=Math.exp;
+  G.max=Math.max; G.min=Math.min;
+  G.sin=Math.sin; G.cos=Math.cos; G.tan=Math.tan;
+  G.asin=Math.asin; G.acos=Math.acos; G.atan=Math.atan; G.atan2=Math.atan2;
+  G.degrees = function(r) { return r * 180 / Math.PI; };
+  G.radians = function(d) { return d * Math.PI / 180; };
+  G.constrain = function(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); };
+  G.dist = function(x1,y1,x2,y2) { return Math.hypot(x2-x1, y2-y1); };
+  G.lerp = function(a, b, t) { return a + (b-a)*t; };
+  G.map  = function(v, s1, e1, s2, e2, clamp) {
+    const r = s2 + (e2-s2) * (v-s1) / (e1-s1);
+    if (!clamp) return r;
+    return e2 > s2 ? G.constrain(r, s2, e2) : G.constrain(r, e2, s2);
+  };
+  G.norm = function(v, s, e) { return G.map(v, s, e, 0, 1); };
+  G.sq   = function(n) { return n*n; };
+  G.mag  = function(x, y) { return Math.hypot(x, y); };
+  G.random = function(lo, hi) {
+    if (lo === undefined) return Math.random();
+    if (hi === undefined) return Math.random() * lo;
+    return lo + Math.random() * (hi - lo);
+  };
+  G.randomGaussian = function(mean, sd) {
+    mean = mean || 0; sd = sd || 1;
+    let u, v;
+    do { u = Math.random(); } while (!u);
+    do { v = Math.random(); } while (!v);
+    return mean + sd * Math.sqrt(-2*Math.log(u)) * Math.cos(2*Math.PI*v);
+  };
+
+  // Perlin-style value noise
+  G.noise = (function() {
+    const p = new Uint8Array(512);
+    for (let i = 0; i < 256; i++) p[i] = p[i+256] = (Math.random()*256)|0;
+    function f(t) { return t*t*t*(t*(t*6-15)+10); }
+    function l(a,b,t) { return a+t*(b-a); }
+    function g(h,x,y) { h &= 3; const u=h<2?x:y, v=h<2?y:x; return ((h&1)?-u:u)+((h&2)?-v:v); }
+    return function(x, y, z) {
+      y=y||0;
+      const X=Math.floor(x)&255, Y=Math.floor(y)&255;
+      x-=Math.floor(x); y-=Math.floor(y);
+      const u=f(x), v=f(y);
+      const a=p[X]+Y, b=p[X+1]+Y;
+      return (l(l(g(p[a],x,y),g(p[b],x-1,y),u),
+               l(g(p[a+1],x,y-1),g(p[b+1],x-1,y-1),u),v)+1)/2;
+    };
+  })();
+  G.noiseSeed = function() {};
+  G.noiseDetail = function() {};
+
+  // Loop control
+  G.frameRate = function(fps) { if (fps !== undefined) _targetFPS = fps; return _targetFPS; };
+  G.loop   = function() { if (!_looping) { _looping = true; _rafId = requestAnimationFrame(_tick); } };
+  G.noLoop = function() { _looping = false; cancelAnimationFrame(_rafId); };
+  G.redraw = function() { if (typeof window.draw === 'function') { _frameReset(); window.draw(); } };
+  G.millis = function() { return performance.now(); };
+
+  // Image (passthrough)
+  G.loadImage = function(src, cb) {
+    const img = new Image(); img.crossOrigin='anonymous';
+    if (cb) img.onload = function() { cb(img); };
+    img.src = src; return img;
+  };
+  G.image = function(img, x, y, w, h) {
+    if (!img || !img.complete) return;
+    if (w !== undefined) _ctx.drawImage(img, x, y, w, h);
+    else _ctx.drawImage(img, x, y);
+  };
+
+  // Pointer / keyboard (live via defineProperty)
+  // Pointer Events cover mouse, pen and touch in one path — deliberately not
+  // running mouse listeners alongside, because two writers of _mouseX is how
+  // the coordinate bugs this change fixes got in.
+  function _setPointer(e) {
+    var d = _toDesign(e.clientX, e.clientY);
+    _mouseX = d.x; _mouseY = d.y;
+    _touches = [{ x: d.x, y: d.y, id: e.pointerId }];
+  }
+  function _call(name, e) {
+    if (typeof window[name] === 'function') { try { window[name](e); } catch (err) { _handleDrawError(err); } }
+  }
+
+  // ── View gestures ──────────────────────────────────────────────────────────
+  // Two fingers drive the view (pinch = zoom, drag = pan); one finger is left
+  // entirely to the sketch, so draggable simulations keep working. Registered
+  // BEFORE the sketch dispatch listeners below so _suppress is already set by
+  // the time they run for the same event.
+  //
+  // Not bound for bioZoom sims: BIO_ZOOM_SHIM has its own pinch that steps
+  // microscope levels, and two pinch handlers on one window would fight.
+  var _pointers = new Map();
+  var _suppress = false;          // a gesture claimed this touch sequence
+  var _pinchDist = 0, _pinchCx = 0, _pinchCy = 0;
+  var _lastTapT = 0, _lastTapX = 0, _lastTapY = 0;
+
+  function _twoPointers() {
+    var it = _pointers.values();
+    return [it.next().value, it.next().value];
+  }
+
+  function _beginGesture() {
+    _suppress = true;
+    // The first finger may already have the sketch mid-drag. Release it, or the
+    // sketch is left holding an object it will never be told was dropped.
+    if (_mouseIsPressed) {
+      _mouseIsPressed = false;
+      // A minimal stand-in event: _call routes a throw into _handleDrawError,
+      // which stops the sketch, so a handler doing e.preventDefault() must not
+      // be handed null here.
+      var synthetic = { preventDefault: function(){}, stopPropagation: function(){} };
+      _call('mouseReleased', synthetic);
+      _call('touchEnded', synthetic);
+    }
+    _touches = [];
+    var p = _twoPointers();
+    _pinchDist = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+    _pinchCx = (p[0].x + p[1].x) / 2;
+    _pinchCy = (p[0].y + p[1].y) / 2;
+  }
+
+  if (!window.__PC_NO_VIEW_ZOOM) {
+    window.addEventListener('pointerdown', function(e) {
+      // A fresh interaction always starts unsuppressed; suppression is NOT
+      // cleared on pointerup, so the tail of a pinch (lifting one finger while
+      // the other stays down) never leaks through as a sketch drag.
+      if (_pointers.size === 0) _suppress = false;
+      _pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (_pointers.size === 2) _beginGesture();
+    }, { passive: true });
+
+    window.addEventListener('pointermove', function(e) {
+      if (!_pointers.has(e.pointerId)) return;
+      _pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (!_suppress || _pointers.size < 2) return;
+
+      var p = _twoPointers();
+      var dist = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+      var cx = (p[0].x + p[1].x) / 2, cy = (p[0].y + p[1].y) / 2;
+
+      // Zoom about the centroid, then pan by how far the centroid itself moved.
+      if (_pinchDist > 0 && dist > 0) _zoomAt(cx, cy, dist / _pinchDist);
+      if (_vz > _VZ_MIN && _canvas) {
+        // Convert the centroid's CSS-px travel into design px before panning.
+        var sc = (_w || _dw) / Math.max(1, _canvas.getBoundingClientRect().width);
+        _setView(_vz, _vx + (cx - _pinchCx) * sc, _vy + (cy - _pinchCy) * sc);
+      }
+      _pinchDist = dist; _pinchCx = cx; _pinchCy = cy;
+    }, { passive: true });
+
+    var _endPointer = function(e) {
+      // Double-tap resets, but only while zoomed — at 1x it would silently steal
+      // double-clicks from sketches that have their own clickable controls.
+      if (!_suppress && _pointers.size === 1 && _vz > _VZ_MIN) {
+        var now = Date.now();
+        if (now - _lastTapT < 300 &&
+            Math.abs(e.clientX - _lastTapX) < 20 &&
+            Math.abs(e.clientY - _lastTapY) < 20) {
+          _resetView();
+          _lastTapT = 0;
+        } else {
+          _lastTapT = now; _lastTapX = e.clientX; _lastTapY = e.clientY;
+        }
+      }
+      _pointers.delete(e.pointerId);
+    };
+    window.addEventListener('pointerup', _endPointer, { passive: true });
+    window.addEventListener('pointercancel', _endPointer, { passive: true });
+
+    // ctrl+wheel is what a trackpad pinch and a browser zoom gesture both emit.
+    // Plain wheel is deliberately left alone — sketches may use it themselves.
+    window.addEventListener('wheel', function(e) {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      _zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.01));
+    }, { passive: false });
+  }
+
+  window.addEventListener('pointermove', function(e) {
+    if (_suppress) return;
+    _pmouseX = _mouseX; _pmouseY = _mouseY;
+    _setPointer(e);
+    if (_mouseIsPressed) { _call('mouseDragged', e); _call('touchMoved', e); }
+    else _call('mouseMoved', e);
+  }, { passive: true });
+
+  window.addEventListener('pointerdown', function(e) {
+    if (_suppress) return;
+    _pmouseX = _mouseX; _pmouseY = _mouseY;
+    // Set coordinates BEFORE dispatching: a tap previously fired mousePressed
+    // with whatever stale position the last mouse move had left behind.
+    _setPointer(e);
+    _mouseIsPressed = true;
+    _call('mousePressed', e);
+    _call('touchStarted', e);
+  });
+
+  window.addEventListener('pointerup', function(e) {
+    if (_suppress) return;
+    _mouseIsPressed = false;
+    _touches = [];
+    _call('mouseReleased', e);
+    _call('touchEnded', e);
+  });
+
+  window.addEventListener('pointercancel', function(e) {
+    if (_suppress) return;
+    _mouseIsPressed = false;
+    _touches = [];
+    _call('touchEnded', e);
+  });
+
+  window.addEventListener('click', function(e) {
+    if (_suppress) return;
+    if (typeof window.mouseClicked === 'function') window.mouseClicked(e);
+  });
+  window.addEventListener('keydown', function(e) {
+    _key = e.key; _keyCode = e.keyCode;
+    if (typeof window.keyPressed === 'function') window.keyPressed(e);
+  });
+  window.addEventListener('keyup', function(e) {
+    if (typeof window.keyReleased === 'function') window.keyReleased(e);
+  });
+  // The logical size never changes after boot — that is the whole point of the
+  // stabilizer — so windowResized() is deliberately not called. A sketch that
+  // defines one still parses (the name stays in the obfuscator's reservedNames);
+  // it simply has nothing to react to. Use window.__pcOnFit for fit callbacks.
+  window.addEventListener('resize', _scheduleFit);
+  window.addEventListener('orientationchange', _scheduleFit);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', _scheduleFit);
+
+  Object.defineProperty(G, 'touches',       { get: function() { return _touches; }, configurable: true });
+  Object.defineProperty(G, 'touchX',         { get: function() { return _touches.length ? _touches[0].x : _mouseX; }, configurable: true });
+  Object.defineProperty(G, 'touchY',         { get: function() { return _touches.length ? _touches[0].y : _mouseY; }, configurable: true });
+  Object.defineProperty(G, 'mouseX',        { get: function() { return _mouseX; } });
+  Object.defineProperty(G, 'mouseY',        { get: function() { return _mouseY; } });
+  Object.defineProperty(G, 'pmouseX',       { get: function() { return _pmouseX; } });
+  Object.defineProperty(G, 'pmouseY',       { get: function() { return _pmouseY; } });
+  Object.defineProperty(G, 'mouseIsPressed',{ get: function() { return _mouseIsPressed; } });
+  Object.defineProperty(G, 'key',           { get: function() { return _key; } });
+  Object.defineProperty(G, 'keyCode',       { get: function() { return _keyCode; } });
+
+  // Tell the contrast floor that upcoming text sits on a known shape rather
+  // than on the canvas. Sim.molecule uses this so its black element letters are
+  // measured against the atom disc (17:1 on hydrogen) instead of the dark
+  // background — without it the floor would "fix" them into illegibility.
+  // Saved/restored by push()/pop() via _snapStyle.
+  G.__pcInkBg = function(c) {
+    _inkBg = (c === null || c === undefined) ? null : _toRgba(_parseColor(c));
+    _bgKey++;
+  };
+  // Live toggle for A/B-ing a single frame from the iframe console.
+  G.__pcContrastFloor = function(on) { _floorOn = !!on; _memo = {}; };
+
+  G.__pcToDesign = _toDesign;
+  G.__pcResetTransform = _resetTransform;
+
+  // ── Engine entry point ─────────────────────────────────────────────────────
+  G.__pcBootstrap = function() {
+    try {
+      if (typeof window.setup === 'function') {
+        window.setup();
+      } else {
+        _createCanvas(_dw, _dh);
+      }
+      if (_looping) _rafId = requestAnimationFrame(_tick);
+      window.parent.postMessage({ type: 'SIMULATION_READY' }, '*');
+      // Back-compat: existing parent listens for __IFRAME_READY__
+      window.parent.postMessage({ type: '__IFRAME_READY__' }, '*');
+      // Heartbeat — parent uses this to detect frozen sketches (no pulse = dead draw loop)
+      setInterval(function () {
+        try {
+          window.parent.postMessage({
+            type: '__HEARTBEAT__',
+            t: Date.now(),
+            frame: _frameCount,
+          }, '*');
+        } catch (_) {}
+      }, 2000);
+    } catch(e) {
+      window.parent.postMessage({ type: 'SIMULATION_ERROR', error: e.message, stage: 'init' }, '*');
+      const el = document.getElementById('_pc_error');
+      if (el) { el.style.display='block'; el.innerHTML = _errorHTML('Init error', e); }
+    }
+  };
+
+  function _esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function _errorHTML(label, e) {
+    return '<h4>⚠️ ' + label + '</h4>' +
+           '<div style="margin-bottom:8px">' + _esc(e.message) + '</div>' +
+           '<pre>' + _esc(e.stack || '') + '</pre>' +
+           '<div class="_pc_hint">Check that setup() and draw() are defined and all variables are declared before use.</div>';
+  }
+  G.__pcErrorHTML = _errorHTML;
+})();
+  </script>
+
+  <script>
+    /* p5-compat shim — additive surface (createVector, nf, square, etc.) */
+    (function buildP5ShimExtension() {
+  'use strict';
+  var G = window;
+
+  // ── p5.Vector ───────────────────────────────────────────────────────────────
+  function PVector(x, y, z) {
+    this.x = x || 0; this.y = y || 0; this.z = z || 0;
+  }
+  PVector.prototype.set = function (x, y, z) {
+    if (x instanceof PVector) { this.x = x.x; this.y = x.y; this.z = x.z; return this; }
+    this.x = x || 0; this.y = y || 0; this.z = z || 0; return this;
+  };
+  PVector.prototype.copy = function () { return new PVector(this.x, this.y, this.z); };
+  PVector.prototype.add = function (v, y, z) {
+    if (v instanceof PVector) { this.x += v.x; this.y += v.y; this.z += v.z; }
+    else { this.x += v || 0; this.y += y || 0; this.z += z || 0; }
+    return this;
+  };
+  PVector.prototype.sub = function (v, y, z) {
+    if (v instanceof PVector) { this.x -= v.x; this.y -= v.y; this.z -= v.z; }
+    else { this.x -= v || 0; this.y -= y || 0; this.z -= z || 0; }
+    return this;
+  };
+  PVector.prototype.mult = function (n) { this.x *= n; this.y *= n; this.z *= n; return this; };
+  PVector.prototype.div = function (n) { if (n) { this.x /= n; this.y /= n; this.z /= n; } return this; };
+  PVector.prototype.mag = function () { return Math.hypot(this.x, this.y, this.z); };
+  PVector.prototype.magSq = function () { return this.x*this.x + this.y*this.y + this.z*this.z; };
+  PVector.prototype.dot = function (v) { return this.x*v.x + this.y*v.y + this.z*v.z; };
+  PVector.prototype.cross = function (v) {
+    return new PVector(
+      this.y*v.z - this.z*v.y,
+      this.z*v.x - this.x*v.z,
+      this.x*v.y - this.y*v.x
+    );
+  };
+  PVector.prototype.dist = function (v) { return Math.hypot(this.x-v.x, this.y-v.y, this.z-v.z); };
+  PVector.prototype.normalize = function () {
+    var m = this.mag(); if (m > 0) this.div(m); return this;
+  };
+  PVector.prototype.setMag = function (m) { return this.normalize().mult(m); };
+  PVector.prototype.limit = function (max) {
+    if (this.magSq() > max*max) this.setMag(max); return this;
+  };
+  PVector.prototype.heading = function () { return Math.atan2(this.y, this.x); };
+  PVector.prototype.rotate = function (a) {
+    var nx = this.x*Math.cos(a) - this.y*Math.sin(a);
+    var ny = this.x*Math.sin(a) + this.y*Math.cos(a);
+    this.x = nx; this.y = ny; return this;
+  };
+  PVector.prototype.lerp = function (v, t) {
+    this.x += (v.x - this.x) * t;
+    this.y += (v.y - this.y) * t;
+    this.z += (v.z - this.z) * t;
+    return this;
+  };
+  PVector.prototype.toString = function () {
+    return 'p5.Vector(' + this.x + ', ' + this.y + ', ' + this.z + ')';
+  };
+  // Static helpers (p5 exposes these as p5.Vector.add(a, b) etc.)
+  PVector.add  = function (a, b) { return new PVector(a.x+b.x, a.y+b.y, a.z+b.z); };
+  PVector.sub  = function (a, b) { return new PVector(a.x-b.x, a.y-b.y, a.z-b.z); };
+  PVector.mult = function (a, n) { return new PVector(a.x*n, a.y*n, a.z*n); };
+  PVector.div  = function (a, n) { return new PVector(a.x/n, a.y/n, a.z/n); };
+  PVector.dist = function (a, b) { return Math.hypot(a.x-b.x, a.y-b.y, a.z-b.z); };
+  PVector.fromAngle = function (a, len) {
+    var l = (len === undefined) ? 1 : len;
+    return new PVector(Math.cos(a)*l, Math.sin(a)*l);
+  };
+  PVector.random2D = function () {
+    var a = Math.random() * Math.PI * 2;
+    return new PVector(Math.cos(a), Math.sin(a));
+  };
+
+  if (!G.p5) G.p5 = {};
+  G.p5.Vector = PVector;
+  G.createVector = function (x, y, z) { return new PVector(x, y, z); };
+
+  // ── Number formatting ─────────────────────────────────────────────────────────
+  // nf(num, left, right) → zero-padded integer part, fixed decimal part.
+  G.nf = function (num, left, right) {
+    function one(n) {
+      var neg = n < 0; n = Math.abs(n);
+      var s = (right === undefined) ? String(n) : n.toFixed(right);
+      var parts = s.split('.');
+      if (left) while (parts[0].length < left) parts[0] = '0' + parts[0];
+      s = parts.join('.');
+      return (neg ? '-' : '') + s;
+    }
+    return Array.isArray(num) ? num.map(one) : one(num);
+  };
+  G.nfc = function (num, right) {
+    function one(n) {
+      var s = (right === undefined) ? String(n) : Number(n).toFixed(right);
+      var parts = s.split('.');
+      parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+      return parts.join('.');
+    }
+    return Array.isArray(num) ? num.map(one) : one(num);
+  };
+  G.nfs = function (num, left, right) {
+    var s = G.nf(num, left, right);
+    function sign(v, str) { return (v >= 0 ? ' ' : '') + str; }
+    return Array.isArray(num) ? num.map(function (n, i) { return sign(n, s[i]); })
+                              : sign(num, s);
+  };
+
+  // ── Type coercion helpers ─────────────────────────────────────────────────────
+  // hex(value, digits) — real p5 API. Absent from the base shim, which is how a
+  // generated sketch calling it crashed the iframe with "hex is not defined".
+  // Accepts a number or an [r,g,b,a] colour array, matching p5's behaviour.
+  if (!G.hex) G.hex = function (n, digits) {
+    var d = digits === undefined ? 8 : digits;
+    if (Array.isArray(n)) return n.map(function (v) { return G.hex(v, d); });
+    var v = Math.round(Number(n));
+    if (!isFinite(v)) return '';
+    if (v < 0) v = v >>> 0;                       // two's complement, as p5 does
+    var out = v.toString(16).toUpperCase();
+    while (out.length < d) out = '0' + out;
+    return out.slice(-d);
+  };
+  if (!G.unhex) G.unhex = function (h) {
+    if (Array.isArray(h)) return h.map(function (v) { return G.unhex(v); });
+    return parseInt(String(h).replace(/^#/, ''), 16) || 0;
+  };
+
+  if (!G.int)     G.int     = function (n) { return Array.isArray(n) ? n.map(function (v){return v|0;}) : (n|0); };
+  if (!G.float)   G.float   = function (n) { return parseFloat(n); };
+  if (!G.str)     G.str     = function (n) { return String(n); };
+  if (!G.boolean) G.boolean = function (n) {
+    if (typeof n === 'string') return n === 'true';
+    return Boolean(n);
+  };
+  if (!G.fract)   G.fract   = function (n) { return n - Math.floor(n); };
+
+  // ── Shapes the base shim omits ────────────────────────────────────────────────
+  if (!G.square) {
+    G.square = function (x, y, s, r) { return G.rect(x, y, s, s, r); };
+  }
+  if (!G.quadraticVertex) {
+    // Approximate as a line to the control-anchored end point.
+    G.quadraticVertex = function (cx, cy, x, y) { if (G.vertex) G.vertex(x, y); };
+  }
+  if (!G.bezierVertex) {
+    G.bezierVertex = function (c1x, c1y, c2x, c2y, x, y) { if (G.vertex) G.vertex(x, y); };
+  }
+  if (!G.curveVertex && G.vertex) G.curveVertex = G.vertex;
+
+  // ── Stroke / text style (style-only; safe no-ops where canvas lacks support) ──
+  if (!G.strokeCap)   G.strokeCap   = function () {};
+  if (!G.strokeJoin)  G.strokeJoin  = function () {};
+  if (!G.textLeading) G.textLeading = function () {};
+  if (!G.textStyle)   G.textStyle   = function () {};
+  if (!G.textWrap)    G.textWrap    = function () {};
+
+  // ── Misc lifecycle / no-op stubs ──────────────────────────────────────────────
+  if (!G.smooth)    G.smooth    = function () {};
+  if (!G.noSmooth)  G.noSmooth  = function () {};
+  if (!G.cursor)    G.cursor    = function () {};
+  if (!G.noCursor)  G.noCursor  = function () {};
+  // HiDPI is owned entirely by the stabilizer's _fit() in iframeBuilder's
+  // P5_SHIM, which folds devicePixelRatio and the fit scale into a single
+  // ctx.setTransform. This file used to wrap createCanvas and background() to
+  // apply DPR itself, which fought the core for control of the canvas element's
+  // inline size — the two-owners bug the stabilizer removes. G.pixelDensity now
+  // lives in the core and feeds the fitter.
+  if (!G.clear) {
+    G.clear = function () {
+      // Design-space extents: the context carries the stabilizer's base
+      // transform, so cv.width (backing px) would overshoot by the fit scale.
+      var cv = document.getElementById('_pc_canvas');
+      if (cv) { var c = cv.getContext('2d'); if (c) c.clearRect(0, 0, G.width, G.height); }
+    };
+  }
+
+  // deltaTime — ms since last frame (approx; base shim runs a fixed-step loop).
+  if (G.deltaTime === undefined) {
+    Object.defineProperty(G, 'deltaTime', {
+      get: function () { return 1000 / 60; },
+      configurable: true,
+    });
+  }
+
+  // ── Constants the base shim omits ─────────────────────────────────────────────
+  if (G.DEGREES === undefined) G.DEGREES = 'degrees';
+  if (G.RADIANS === undefined) G.RADIANS = 'radians';
+  if (G.PIE     === undefined) G.PIE = 'pie';
+  if (G.CHORD   === undefined) G.CHORD = 'chord';
+  if (G.PROJECT === undefined) G.PROJECT = 'project';
+  if (G.SQUARE  === undefined) G.SQUARE = 'butt';
+  if (G.ROUND   === undefined) G.ROUND = 'round';
+  if (G.MITER   === undefined) G.MITER = 'miter';
+  if (G.BEVEL   === undefined) G.BEVEL = 'bevel';
+  if (G.BOLD    === undefined) G.BOLD = 'bold';
+  if (G.ITALIC  === undefined) G.ITALIC = 'italic';
+  if (G.NORMAL  === undefined) G.NORMAL = 'normal';
+
+  // angleMode — base colorMode is a no-op; provide a real toggle so sketches that
+  // call angleMode(DEGREES) and then sin(angle) in degrees don't silently break.
+  // We wrap the trig globals to honor the mode.
+  var _angleMode = 'radians';
+  var _sin = Math.sin, _cos = Math.cos, _tan = Math.tan;
+  G.angleMode = function (m) { if (m) _angleMode = (m === 'degrees') ? 'degrees' : 'radians'; return _angleMode; };
+  G.sin = function (a) { return _sin(_angleMode === 'degrees' ? a * Math.PI / 180 : a); };
+  G.cos = function (a) { return _cos(_angleMode === 'degrees' ? a * Math.PI / 180 : a); };
+  G.tan = function (a) { return _tan(_angleMode === 'degrees' ? a * Math.PI / 180 : a); };
+})();
+  </script>
+
+  <script>
+
+(function () {
+  function ctx() {
+    var c = document.getElementById('_pc_canvas');
+    return c ? c.getContext('2d') : null;
+  }
+
+  var _layers = [{ label: 'Layer', scale: 1, color: '#74c69d' }];
+  var _target = 0;                 // target layer index
+  var _logScaleTarget = 0;         // log2 of target world scale
+  var _logScaleCurrent = 0;        // log2 of current (interpolated) world scale
+  var _camX = 400, _camY = 300;    // world-space camera centre (800x600 world)
+  var _hotspots = [];              // { x, y, w, h, layer }
+
+  function clampLayer(i) {
+    return Math.max(0, Math.min(_layers.length - 1, i | 0));
+  }
+
+  var BioZoom = {
+    init: function (layers) {
+      if (Array.isArray(layers) && layers.length) _layers = layers;
+      _target = 0;
+      var s0 = _layers[0] && _layers[0].scale ? _layers[0].scale : 1;
+      // Guard: Math.log2(0) === -Infinity
+      _logScaleTarget = Math.log2(s0 > 0 ? s0 : 1);
+      _logScaleCurrent = _logScaleTarget;
+      _camX = 400; _camY = 300;
+      _hotspots = [];
+    },
+
+    get currentLayer() { return _target; },
+    get scale() { return Math.pow(2, _logScaleCurrent); },
+
+    push: function () {
+      var g = ctx(); if (!g) return;
+      // Interpolate in log space each frame
+      _logScaleCurrent += (_logScaleTarget - _logScaleCurrent) * 0.072;
+      var worldScale = Math.pow(2, _logScaleCurrent);
+      // Design space — the context already maps design px to backing px.
+      var cx = (window.width || 800) / 2;
+      var cy = (window.height || 600) / 2;
+      g.save();
+      g.translate(cx - _camX * worldScale, cy - _camY * worldScale);
+      g.scale(worldScale, worldScale);
+    },
+
+    pop: function () { var g = ctx(); if (g) g.restore(); },
+
+    zoomTo: function (i, wx, wy) {
+      _target = clampLayer(i);
+      var s = _layers[_target] && _layers[_target].scale ? _layers[_target].scale : 1;
+      _logScaleTarget = Math.log2(s > 0 ? s : 1);
+      if (typeof wx === 'number' && typeof wy === 'number') { _camX = wx; _camY = wy; }
+    },
+
+    zoomOut: function () { BioZoom.zoomTo(_target - 1); },
+
+    clearHotspots: function () { _hotspots = []; },
+
+    registerHotspot: function (x, y, w, h, layer) {
+      _hotspots.push({ x: x, y: y, w: w, h: h, layer: clampLayer(layer) });
+    },
+
+    // screen → world, then test hotspots (topmost last wins)
+    checkClick: function (sx, sy) {
+      var worldScale = Math.pow(2, _logScaleCurrent);
+      // Must mirror push() exactly, or hotspots land off-target.
+      var cx = (window.width || 800) / 2;
+      var cy = (window.height || 600) / 2;
+      var wx = (sx - (cx - _camX * worldScale)) / worldScale;
+      var wy = (sy - (cy - _camY * worldScale)) / worldScale;
+      for (var i = _hotspots.length - 1; i >= 0; i--) {
+        var h = _hotspots[i];
+        if (wx >= h.x && wx <= h.x + h.w && wy >= h.y && wy <= h.y + h.h) {
+          BioZoom.zoomTo(h.layer, h.x + h.w / 2, h.y + h.h / 2);
+          return true;
+        }
+      }
+      return false;
+    },
+
+    drawUI: function () {
+      var g = ctx(); if (!g) return;
+      var W = window.width || 800;
+      var H = window.height || 600;
+      g.save();
+      // Design-space identity, not raw identity: at raw identity the HUD would
+      // render at 1:1 physical px — a postage stamp on a 4K board.
+      if (typeof window.__pcResetTransform === 'function') window.__pcResetTransform();
+      else g.setTransform(1, 0, 0, 1, 0, 0);
+      // Breadcrumb trail
+      g.font = '12px monospace';
+      g.textBaseline = 'top';
+      var x = 14;
+      for (var i = 0; i < _layers.length; i++) {
+        var active = i === _target;
+        g.fillStyle = active ? (_layers[i].color || '#d8f3dc') : '#5a6b60';
+        var label = _layers[i].label || ('L' + i);
+        g.fillText(label, x, 14);
+        x += g.measureText(label).width + 8;
+        if (i < _layers.length - 1) {
+          g.fillStyle = '#3a463f';
+          g.fillText('>', x, 14);
+          x += g.measureText('> ').width;
+        }
+      }
+      // Zoom bar (right edge)
+      var barH = Math.min(180, H - 80);
+      var bx = W - 26, by = 40;
+      g.fillStyle = 'rgba(80,120,90,0.25)';
+      g.fillRect(bx, by, 6, barH);
+      var frac = _layers.length > 1 ? _target / (_layers.length - 1) : 0;
+      g.fillStyle = (_layers[_target] && _layers[_target].color) || '#74c69d';
+      g.fillRect(bx - 2, by + frac * (barH - 14), 10, 14);
+      g.fillStyle = '#5a6b60';
+      g.fillText('scroll / click', 14, H - 22);
+      g.restore();
+    },
+  };
+
+  window.BioZoom = BioZoom;
+
+  // ── Input wiring (handled by the shim, not the sketch) ──
+  function rel(e) {
+    // Single shared converter, so hit-testing cannot drift from rendering.
+    if (typeof window.__pcToDesign === 'function') return window.__pcToDesign(e.clientX, e.clientY);
+    var cv = document.getElementById('_pc_canvas');
+    var r = cv ? cv.getBoundingClientRect() : { left: 0, top: 0 };
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  window.addEventListener('wheel', function (e) {
+    if (e.deltaY < 0) BioZoom.zoomTo(_target + 1);
+    else if (e.deltaY > 0) BioZoom.zoomTo(_target - 1);
+  }, { passive: true });
+
+  window.addEventListener('click', function (e) {
+    var p = rel(e);
+    BioZoom.checkClick(p.x, p.y);
+  });
+
+  window.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') BioZoom.zoomOut();
+  });
+
+  // Touch pinch → layer change
+  var _pinchStart = 0;
+  function dist(t) {
+    var dx = t[0].clientX - t[1].clientX, dy = t[0].clientY - t[1].clientY;
+    return Math.hypot(dx, dy);
+  }
+  window.addEventListener('touchstart', function (e) {
+    if (e.touches.length === 2) _pinchStart = dist(e.touches);
+  }, { passive: true });
+  window.addEventListener('touchmove', function (e) {
+    if (e.touches.length === 2 && _pinchStart > 0) {
+      var ratio = dist(e.touches) / _pinchStart;
+      if (ratio > 1.25) { BioZoom.zoomTo(_target + 1); _pinchStart = dist(e.touches); }
+      else if (ratio < 0.80) { BioZoom.zoomTo(_target - 1); _pinchStart = dist(e.touches); }
+    }
+  }, { passive: true });
+})();
+
+</script>
+
+  <script>
+    /* Sim.* pixel component library — HD drawing primitives */
+    
+(function installSimLib() {
+  'use strict';
+
+  // Colour normaliser.
+  //
+  // The Sim.* API documents colours as CSS strings ('#f97316'), but the three
+  // functions that need per-channel alpha do red()/green()/blue() arithmetic,
+  // and the p5 shim's accessors return 0 for anything that is not an
+  // [r,g,b,a] array (_parseColor passes strings through untouched). Passing the
+  // documented string form therefore rendered pure BLACK — invisible on the
+  // dark canvas, including via the built-in defaults. Normalise every accepted
+  // form to an array before any channel arithmetic.
+  function _toRGBA(c, fallback) {
+    var v = (c === undefined || c === null || c === '') ? fallback : c;
+    if (Array.isArray(v)) return v;
+    if (typeof v === 'number') return [v, v, v, 255];
+    if (typeof v === 'string') {
+      var s = v.trim();
+      var m = /^#([0-9a-fA-F]{3,8})$/.exec(s);
+      if (m) {
+        var h = m[1];
+        if (h.length === 3 || h.length === 4) {
+          h = h.split('').map(function(ch) { return ch + ch; }).join('');
+        }
+        if (h.length >= 6) {
+          return [
+            parseInt(h.slice(0, 2), 16),
+            parseInt(h.slice(2, 4), 16),
+            parseInt(h.slice(4, 6), 16),
+            h.length >= 8 ? parseInt(h.slice(6, 8), 16) : 255
+          ];
+        }
+      }
+      var fn = /^rgba?\(([^)]+)\)$/i.exec(s);
+      if (fn) {
+        var parts = fn[1].split(',').map(function(x) { return parseFloat(x); });
+        if (parts.length >= 3) {
+          return [
+            parts[0] | 0, parts[1] | 0, parts[2] | 0,
+            parts.length > 3 ? Math.round(parts[3] * 255) : 255
+          ];
+        }
+      }
+    }
+    // Never fall back to black on a dark canvas — that is the failure mode
+    // this function exists to prevent.
+    return [250, 204, 21, 255];
+  }
+
+  // HiDPI is applied by the stabilizer's _fit(), identically whether or not
+  // BioZoom is present. This used to fork those two paths, which is why
+  // BioZoom double-applied devicePixelRatio.
+
+  var Sim = {};
+
+  // ─── Shared ─────────────────────────────────────────────────────────────────
+
+  Sim.bg = function() {
+    push(); background(15, 15, 25); pop();
+  };
+
+  Sim.label = function(str, x, y, opts) {
+    opts = opts || {};
+    push();
+    fill(opts.color || 220); noStroke();
+    textSize(opts.size || 13); textFont('monospace');
+    textAlign(opts.align || LEFT, CENTER);
+    text(str, x, y);
+    pop();
+  };
+
+  // Top-LEFT, not the bottom edge: the ParametersCard floats over the bottom
+  // centre of the stage and clipped this line. Top-right is the View/Write
+  // toggle, so the left corner is the only chrome-free anchor.
+  Sim.statusBar = function(str, opts) {
+    opts = opts || {};
+    push();
+    fill(opts.color || 180); noStroke();
+    textSize(opts.size || 12); textFont('monospace');
+    textAlign(LEFT, TOP);
+    text(str, 12, 12);
+    pop();
+  };
+
+  // ─── Physics ────────────────────────────────────────────────────────────────
+
+  Sim.arrow = function(x1, y1, x2, y2, opts) {
+    opts = opts || {};
+    push();
+    stroke(opts.color || '#f97316'); strokeWeight(opts.weight || 2); fill(opts.color || '#f97316');
+    line(x1, y1, x2, y2);
+    var ang = atan2(y2 - y1, x2 - x1);
+    var hs = opts.headSize || 10;
+    translate(x2, y2);
+    rotate(ang);
+    triangle(0, 0, -hs, -hs * 0.5, -hs, hs * 0.5);
+    if (opts.label) {
+      rotate(-ang); fill(opts.color || '#f97316'); noStroke(); textSize(11); textAlign(CENTER, BOTTOM);
+      text(opts.label, 0, -4);
+    }
+    pop();
+  };
+
+  Sim.trajectory = function(pts, opts) {
+    if (!pts || pts.length < 2) return;
+    opts = opts || {};
+    push();
+    stroke(opts.color || '#38bdf8'); strokeWeight(opts.weight || 1.5); noFill();
+    var _tc = _toRGBA(opts.color, '#38bdf8');
+    beginShape();
+    for (var i = 0; i < pts.length; i++) {
+      if (opts.fade) stroke(_tc[0], _tc[1], _tc[2], map(i, 0, pts.length-1, 30, 220));
+      vertex(pts[i].x, pts[i].y);
+    }
+    endShape();
+    pop();
+  };
+
+  Sim.particle = function(x, y, r, opts) {
+    opts = opts || {};
+    push();
+    var layers = opts.glowLayers || 3;
+    var _pc = _toRGBA(opts.color, '#facc15');
+    for (var g = layers; g >= 0; g--) {
+      var a = g === 0 ? 255 : map(g, 1, layers, 160, 20);
+      var rr = r + g * 4;
+      fill(_pc[0], _pc[1], _pc[2], a);
+      noStroke(); ellipse(x, y, rr * 2, rr * 2);
+    }
+    if (opts.label) {
+      fill(255); noStroke(); textSize(11); textAlign(CENTER, CENTER); text(opts.label, x, y - r - 10);
+    }
+    pop();
+  };
+
+  Sim.groundLine = function(y, opts) {
+    opts = opts || {};
+    push();
+    stroke(opts.color || '#6b7280'); strokeWeight(2); line(0, y, width, y);
+    var sp = opts.hatchSpacing || 18; var hl = opts.hatchLen || 8;
+    strokeWeight(1);
+    for (var xx = 0; xx < width; xx += sp) line(xx, y, xx - hl, y + hl);
+    pop();
+  };
+
+  Sim.axisGrid = function(ox, oy, sx, sy, opts) {
+    opts = opts || {};
+    push();
+    stroke(88, 100, 124); strokeWeight(1);
+    for (var xx = ox % sx; xx < width; xx += sx) line(xx, 0, xx, height);
+    for (var yy = oy % sy; yy < height; yy += sy) line(0, yy, width, yy);
+    stroke(120, 132, 158); strokeWeight(2);
+    line(ox, 0, ox, height); line(0, oy, width, oy);
+    if (opts.xLabel) { fill(160); noStroke(); textSize(11); textAlign(LEFT, TOP); text(opts.xLabel, ox + 4, oy - 16); }
+    if (opts.yLabel) { fill(160); noStroke(); textSize(11); textAlign(LEFT, TOP); text(opts.yLabel, ox + 4, 4); }
+    pop();
+  };
+
+  Sim.forceVec = function(x, y, fx, fy, opts) {
+    opts = opts || {};
+    var sc = opts.scale || 1;
+    Sim.arrow(x, y, x + fx * sc, y + fy * sc, opts);
+  };
+
+  Sim.oscilloPath = function(values, x, y, w, h, opts) {
+    opts = opts || {};
+    push();
+    fill(0, 0, 0, opts.bgAlpha !== undefined ? opts.bgAlpha : 60); noStroke(); rect(x, y, w, h);
+    stroke(opts.color || '#4ade80'); strokeWeight(opts.weight || 1.5); noFill();
+    beginShape();
+    for (var i = 0; i < values.length; i++) {
+      vertex(x + map(i, 0, values.length - 1, 0, w), y + h / 2 - values[i] * h * 0.45);
+    }
+    endShape();
+    pop();
+  };
+
+  // ─── Chemistry ──────────────────────────────────────────────────────────────
+
+  Sim.beaker = function(x, y, w, h, fillFrac, fillColor, opts) {
+    opts = opts || {};
+    var wc = opts.wallColor || '#94a3b8';
+    push();
+    // liquid
+    var liquidH = h * constrain(fillFrac, 0, 1);
+    fill(fillColor || '#3b82f6'); noStroke();
+    rect(x + 4, y + h - liquidH, w - 8, liquidH - 10);
+    // bubbles
+    if (opts.showBubbles && opts.frameCount) {
+      fill(255, 255, 255, 80); noStroke();
+      var fc = opts.frameCount;
+      for (var b = 0; b < 4; b++) {
+        var bx = x + 8 + ((fc * (b + 1) * 7 + b * 37) % (w - 16));
+        var by = y + h - 14 - ((fc * (b + 1) * 3) % liquidH);
+        ellipse(bx, by, 5, 5);
+      }
+    }
+    // walls
+    stroke(wc); strokeWeight(2); fill(0, 0); rect(x, y, w, h, 0, 0, 4, 4);
+    // lip
+    line(x - 4, y, x, y); line(x + w, y, x + w + 4, y);
+    if (opts.label) { fill(220); noStroke(); textSize(11); textAlign(CENTER, TOP); text(opts.label, x + w / 2, y + h + 4); }
+    pop();
+  };
+
+  Sim.molecule = function(cx, cy, atoms, bonds, opts) {
+    opts = opts || {};
+    var sc = opts.scale || 1;
+    push();
+    stroke('#64748b'); strokeWeight(1.5 * sc);
+    for (var bi = 0; bi < bonds.length; bi++) {
+      var a1 = atoms[bonds[bi][0]], a2 = atoms[bonds[bi][1]];
+      line(cx + a1.x * sc, cy + a1.y * sc, cx + a2.x * sc, cy + a2.y * sc);
+    }
+    for (var ai = 0; ai < atoms.length; ai++) {
+      var a = atoms[ai]; var r = (a.r || 12) * sc;
+      var ac = a.element === 'O' ? '#ef4444' : a.element === 'N' ? '#3b82f6' : a.element === 'H' ? '#e2e8f0' : '#94a3b8';
+      fill(ac); noStroke(); ellipse(cx + a.x * sc, cy + a.y * sc, r * 2, r * 2);
+      // Black is CORRECT here — the letter sits on the atom disc, not on the
+      // canvas (17:1 on hydrogen, 5.6:1 on oxygen). __pcInkBg points the
+      // contrast floor at the disc so it leaves this alone.
+      if (opts.showLabels !== false) { __pcInkBg(ac); fill(0); textSize(10 * sc); textAlign(CENTER, CENTER); text(a.element, cx + a.x * sc, cy + a.y * sc); __pcInkBg(null); }
+    }
+    pop();
+  };
+
+  Sim.concBar = function(x, y, barH, fraction, label, fillColor, opts) {
+    opts = opts || {};
+    push();
+    fill(opts.bgColor || '#1e293b'); noStroke(); rect(x, y - barH, opts.width || 24, barH, 2);
+    fill(fillColor); noStroke(); rect(x, y - barH * fraction, opts.width || 24, barH * fraction, 0, 0, 2, 2);
+    stroke('#475569'); noFill(); strokeWeight(1); rect(x, y - barH, opts.width || 24, barH, 2);
+    fill(200); noStroke(); textSize(10); textAlign(CENTER, TOP); text(label, x + (opts.width || 24) / 2, y + 4);
+    pop();
+  };
+
+  Sim.reactionArrow = function(x, y, len, reversible, opts) {
+    opts = opts || {};
+    if (reversible) {
+      Sim.arrow(x, y - 5, x + len, y - 5, opts);
+      Sim.arrow(x + len, y + 5, x, y + 5, { color: opts.color || '#94a3b8' });
+    } else {
+      Sim.arrow(x, y, x + len, y, opts);
+    }
+    if (opts.label) { push(); fill(opts.color||'#94a3b8'); noStroke(); textSize(11); textAlign(CENTER, BOTTOM); text(opts.label, x + len/2, y - 8); pop(); }
+  };
+
+  Sim.burette = function(x, y, h, fillFrac, dripping, opts) {
+    opts = opts || {};
+    var liquidColor = opts.liquidColor || '#3b82f6';
+    push();
+    var liqH = h * 0.8 * constrain(fillFrac, 0, 1);
+    fill(liquidColor); noStroke();
+    rect(x + 2, y + (h * 0.8 - liqH), 12, liqH);
+    rect(x + 4, y + h * 0.8, 8, h * 0.1);
+    // drip
+    if (dripping && opts.frameCount) {
+      var dropY = y + h + ((opts.frameCount * 4) % 40);
+      fill(liquidColor); noStroke(); ellipse(x + 8, dropY, 6, 8);
+    }
+    stroke('#94a3b8'); strokeWeight(2); fill(0,0);
+    rect(x, y, 16, h * 0.8);
+    line(x + 4, y + h * 0.8, x + 4, y + h);
+    line(x + 12, y + h * 0.8, x + 12, y + h);
+    line(x + 4, y + h, x + 12, y + h);
+    pop();
+  };
+
+  // ─── Mathematics ────────────────────────────────────────────────────────────
+
+  Sim.axes = function(cx, cy, w, h, xRange, yRange, opts) {
+    opts = opts || {};
+    push();
+    if (opts.gridLines !== false) {
+      stroke(88, 100, 124); strokeWeight(1);
+      var xStep = w / 5; var yStep = h / 5;
+      for (var gx = cx - w/2; gx <= cx + w/2; gx += xStep) line(gx, cy - h/2, gx, cy + h/2);
+      for (var gy = cy - h/2; gy <= cy + h/2; gy += yStep) line(cx - w/2, gy, cx + w/2, gy);
+    }
+    stroke(opts.color || '#e2e8f0'); strokeWeight(2);
+    line(cx - w/2, cy, cx + w/2, cy);
+    line(cx, cy - h/2, cx, cy + h/2);
+    fill(opts.color || '#e2e8f0'); noStroke(); textSize(11);
+    if (opts.xLabel) { textAlign(RIGHT, TOP); text(opts.xLabel, cx + w/2, cy + 4); }
+    if (opts.yLabel) { textAlign(LEFT, BOTTOM); text(opts.yLabel, cx + 4, cy - h/2); }
+    pop();
+  };
+
+  Sim.plotCurve = function(fn, cx, cy, w, h, xRange, yRange, opts) {
+    opts = opts || {};
+    var steps = opts.steps || 200;
+    push();
+    stroke(opts.color || '#818cf8'); strokeWeight(opts.weight || 2); noFill();
+    beginShape();
+    for (var s = 0; s <= steps; s++) {
+      var xv = map(s, 0, steps, xRange[0], xRange[1]);
+      var yv = fn(xv);
+      if (isFinite(yv)) vertex(map(xv, xRange[0], xRange[1], cx - w/2, cx + w/2), map(yv, yRange[0], yRange[1], cy + h/2, cy - h/2));
+    }
+    endShape();
+    pop();
+  };
+
+  Sim.plotPoints = function(pts, cx, cy, w, h, xRange, yRange, opts) {
+    opts = opts || {};
+    push();
+    fill(opts.color || '#f472b6'); noStroke();
+    var r = opts.r || 4;
+    for (var i = 0; i < pts.length; i++) {
+      var px = map(pts[i][0], xRange[0], xRange[1], cx - w/2, cx + w/2);
+      var py = map(pts[i][1], yRange[0], yRange[1], cy + h/2, cy - h/2);
+      ellipse(px, py, r * 2, r * 2);
+    }
+    if (opts.connect) {
+      stroke(opts.color || '#f472b6'); strokeWeight(1.5); noFill();
+      beginShape();
+      for (var j = 0; j < pts.length; j++) {
+        vertex(map(pts[j][0], xRange[0], xRange[1], cx - w/2, cx + w/2), map(pts[j][1], yRange[0], yRange[1], cy + h/2, cy - h/2));
+      }
+      endShape();
+    }
+    pop();
+  };
+
+  Sim.seriesBar = function(values, labels, x, y, w, h, opts) {
+    opts = opts || {};
+    var n = values.length; if (!n) return;
+    var maxVal = opts.maxVal || Math.max.apply(null, values.map(Math.abs));
+    var bw = (w - (n - 1) * 4) / n;
+    push();
+    for (var i = 0; i < n; i++) {
+      var bh = maxVal > 0 ? abs(values[i]) / maxVal * h : 0;
+      fill(opts.color || '#818cf8'); noStroke(); rect(x + i * (bw + 4), y + h - bh, bw, bh, 2, 2, 0, 0);
+      fill(180); textSize(10); textAlign(CENTER, TOP); text(labels[i], x + i * (bw + 4) + bw / 2, y + h + 4);
+      if (opts.showValues) { fill(220); textAlign(CENTER, BOTTOM); text(nf(values[i], 1, 1), x + i * (bw + 4) + bw / 2, y + h - bh - 2); }
+    }
+    pop();
+  };
+
+  Sim.unitCircle = function(cx, cy, r, angle, opts) {
+    opts = opts || {};
+    push();
+    stroke(88, 100, 124); strokeWeight(1); noFill(); ellipse(cx, cy, r * 2, r * 2);
+    stroke(opts.color || '#38bdf8'); strokeWeight(2); noFill();
+    line(cx, cy, cx + r, cy); line(cx, cy, cx, cy - r);
+    var px = cx + r * cos(angle); var py = cy - r * sin(angle);
+    stroke(opts.color || '#facc15'); strokeWeight(2); line(cx, cy, px, py);
+    fill(opts.color || '#facc15'); noStroke(); ellipse(px, py, 8, 8);
+    if (opts.showProjections) {
+      stroke(100, 120, 160); strokeWeight(1); setLineDash([4, 4]);
+      line(px, py, px, cy); line(px, py, cx, py);
+      setLineDash([]);
+    }
+    if (opts.labelAngle !== false) {
+      fill(200); noStroke(); textSize(12); textAlign(CENTER, CENTER);
+      text(nf(degrees(angle), 1, 1) + '°', cx + r * 0.35 * cos(angle / 2), cy - r * 0.35 * sin(angle / 2));
+    }
+    pop();
+  };
+
+  // ─── Biology ────────────────────────────────────────────────────────────────
+
+  Sim.cell = function(x, y, r, opts) {
+    opts = opts || {};
+    var isPlant = opts.type === 'plant';
+    push();
+    // cell wall (plant) or membrane (animal)
+    if (isPlant) { stroke('#4ade80'); strokeWeight(3); fill(opts.color || '#14532d'); rect(x - r, y - r, r * 2, r * 2, 4); }
+    else { stroke('#22d3ee'); strokeWeight(2); fill(opts.color || '#0c4a6e'); ellipse(x, y, r * 2, r * 2); }
+    // nucleus
+    fill(opts.nucleusColor || '#7c3aed'); noStroke(); var nr = r * 0.28;
+    ellipse(x + r * 0.15, y - r * 0.1, nr * 2, nr * 2);
+    // organelles
+    if (opts.showOrganelles !== false) {
+      fill('#f59e0b'); noStroke();
+      for (var i = 0; i < 5; i++) {
+        var ox = x + (i % 3 - 1) * r * 0.45; var oy = y + (floor(i / 3) - 0.5) * r * 0.55;
+        ellipse(ox, oy, r * 0.14, r * 0.08);
+      }
+      if (isPlant) { fill('#16a34a'); for (var ci = 0; ci < 4; ci++) { ellipse(x + cos(ci * HALF_PI + 0.4) * r * 0.55, y + sin(ci * HALF_PI + 0.4) * r * 0.55, r * 0.18, r * 0.12); } }
+    }
+    pop();
+  };
+
+  Sim.organelle = function(x, y, type, scale, opts) {
+    opts = opts || {}; scale = scale || 1;
+    push();
+    var sw = constrain(1.5 / scale, 0.5, 3);
+    if (type === 'nucleus') { stroke('#7c3aed'); fill(opts.color || '#4c1d95'); strokeWeight(sw * 1.5); ellipse(x, y, (opts.size || 40) * scale, (opts.size || 30) * scale); }
+    else if (type === 'mitochondria') { stroke('#f59e0b'); fill(opts.color || '#78350f'); strokeWeight(sw); ellipse(x, y, (opts.size || 32) * scale, (opts.size || 16) * scale); stroke('#fbbf24'); line(x - 10 * scale, y, x + 10 * scale, y); }
+    else if (type === 'chloroplast') { stroke('#16a34a'); fill(opts.color || '#14532d'); strokeWeight(sw); ellipse(x, y, (opts.size || 34) * scale, (opts.size || 18) * scale); }
+    else if (type === 'ribosome') { fill(opts.color || '#64748b'); noStroke(); ellipse(x, y, 6 * scale, 6 * scale); }
+    else if (type === 'vacuole') { stroke('#38bdf8'); fill(opts.color || '#0369a1'); strokeWeight(sw); ellipse(x, y, (opts.size || 50) * scale, (opts.size || 40) * scale); }
+    pop();
+  };
+
+  Sim.dnaHelix = function(x, y, h, progress, opts) {
+    opts = opts || {};
+    push();
+    var strands = opts.strands || 20;
+    var amp = opts.amplitude || 24;
+    var c1 = opts.color1 || '#38bdf8'; var c2 = opts.color2 || '#f472b6'; var cb = opts.baseColor || '#64748b';
+    for (var i = 0; i <= strands; i++) {
+      var t = i / strands * TWO_PI * 2 + progress;
+      var py1 = y + (i / strands) * h;
+      var px1 = x + cos(t) * amp; var px2 = x + cos(t + PI) * amp;
+      stroke(cb); strokeWeight(1); line(px1, py1, px2, py1);
+      stroke(c1); strokeWeight(3); point(px1, py1);
+      stroke(c2); strokeWeight(3); point(px2, py1);
+    }
+    pop();
+  };
+
+  Sim.populationPlot = function(values, x, y, w, h, fillColor, opts) {
+    opts = opts || {};
+    if (!values || !values.length) return;
+    var maxV = Math.max.apply(null, values);
+    push();
+    if (opts.fillUnder) { var _fc = _toRGBA(fillColor, '#38bdf8'); fill(_fc[0], _fc[1], _fc[2], 60); noStroke(); beginShape(); vertex(x, y + h); for (var fi = 0; fi < values.length; fi++) vertex(x + map(fi, 0, values.length-1, 0, w), y + h - map(values[fi], 0, maxV, 0, h)); vertex(x + w, y + h); endShape(CLOSE); }
+    stroke(fillColor); strokeWeight(opts.weight || 2); noFill();
+    beginShape();
+    for (var i = 0; i < values.length; i++) vertex(x + map(i, 0, values.length-1, 0, w), y + h - map(values[i], 0, maxV, 0, h));
+    endShape();
+    if (opts.label) { fill(fillColor); noStroke(); textSize(11); textAlign(LEFT, TOP); text(opts.label, x + 4, y + 4); }
+    pop();
+  };
+
+  Sim.microLabel = function(x, y, str, opts) {
+    opts = opts || {};
+    push();
+    var sz = opts.size || 12;
+    if (opts.bg) { textSize(sz); var tw = textWidth(str); fill(0,0,0,160); noStroke(); rect(x - 3, y - sz * 0.8, tw + 6, sz + 4, 2); }
+    fill(opts.color || '#94a3b8'); noStroke(); textSize(sz); textAlign(LEFT, CENTER); text(str, x, y);
+    pop();
+  };
+
+  // ─── Install ─────────────────────────────────────────────────────────────────
+  window.Sim = Sim;
+})();
+
+  </script>
+
+  <script>
+    /* postMessage controller */
+    (function() {
+  'use strict';
+  window.addEventListener('message', function(e) {
+    const msg = e.data;
+    if (!msg || typeof msg.type !== 'string') return;
+    if (msg.type !== 'UPDATE_PARAMS') return;
+    try {
+      if (window.params && typeof window.params === 'object' && msg.params) {
+        Object.assign(window.params, msg.params);
+      }
+    } catch(err) {
+      window.parent.postMessage({ type: 'SIMULATION_ERROR', error: err.message, stage: 'param' }, '*');
+    }
+  });
+})();
+  </script>
+
+  <script>
+    /* Global error reporter — catches sketch parse / top-level runtime errors
+       so we don't lose them when the sketch runs outside an IIFE (as below).   */
+    window.__pcInitFailed = false;
+    window.addEventListener('error', function (ev) {
+      window.__pcInitFailed = true;
+      var el = document.getElementById('_pc_error');
+      if (el) {
+        el.style.display = 'block';
+        el.innerHTML = window.__pcErrorHTML
+          ? window.__pcErrorHTML('Script error', ev.error || { message: ev.message, stack: '' })
+          : '<h4>⚠️ Script error</h4><div>' + String(ev.message) + '</div>';
+      }
+      try {
+        window.parent.postMessage({
+          type: 'SIMULATION_ERROR',
+          error: ev.message,
+          stack: ev.error && ev.error.stack,
+          stage: 'init',
+        }, '*');
+      } catch (_) {}
+    });
+  </script>
+
+  <script>
+    /* Simulation sketch — runs at script top level (no IIFE, no 'use strict')
+       so that `function setup() {...}`, `let/var params`, etc. attach to the
+       global scope exactly like they do in Claude Artifacts / p5 web editor. */
+    /*__PC_SKETCH__*/
+  </script>
+
+  <script>
+    /* Bootstrap runs only if the sketch loaded without a parse / top-level error.
+       Bundled runtimes (real p5) start themselves on window load and define no
+       __pcBootstrap, so this is a no-op there by construction. */
+    if (!window.__pcInitFailed && typeof window.__pcBootstrap === 'function') {
+      window.__pcBootstrap();
+    }
+  </script>
+
+  
+</body>
+</html>
